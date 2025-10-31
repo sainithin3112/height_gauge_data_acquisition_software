@@ -1,4 +1,3 @@
-\
 import os
 import re
 import sqlite3
@@ -12,7 +11,7 @@ from flask import Flask, render_template, request, jsonify, send_file, redirect,
 
 try:
     import serial  # pyserial
-except Exception as e:
+except Exception:
     serial = None
 
 APP_DIR = Path(__file__).resolve().parent
@@ -22,15 +21,27 @@ DB_PATH = DATA_DIR / "app.db"
 CFG_PATH = DATA_DIR / "config.json"
 
 DEFAULT_CFG = {
-    "serial_port": "COM3",     # e.g., "COM3" on Windows, "/dev/ttyUSB0" on Linux
+    "serial_port": "COM3",     # "COM3" on Windows, "/dev/ttyUSB0" on Linux
     "baudrate": 9600,
     "bytesize": 8,
     "parity": "N",             # 'N', 'E', 'O'
     "stopbits": 1,
-    "timeout": 0.1,
+    "timeout": 0.2,            # seconds
     "unit": "mm",
     "decimal_places": 3
 }
+
+# -------------------- Config & DB helpers --------------------
+def json_load(p: Path):
+    import json
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def json_dump(p: Path, obj):
+    import json
+    p.parent.mkdir(exist_ok=True, parents=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
 
 def load_cfg():
     if CFG_PATH.exists():
@@ -42,17 +53,6 @@ def load_cfg():
 
 def save_cfg(cfg):
     json_dump(CFG_PATH, cfg)
-
-def json_load(p: Path):
-    import json
-    with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def json_dump(p: Path, obj):
-    import json
-    p.parent.mkdir(exist_ok=True, parents=True)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -90,9 +90,10 @@ def init_db():
     )
     conn.commit()
     conn.close()
+    # Make sure columns exist on old DBs
+    ensure_column("pellets", "op_product_lot_no", "TEXT")
 
-# ---- Serial Reader Thread ----------------------------------------------------
-
+# -------------------- Serial Reader Thread --------------------
 class SerialReader(threading.Thread):
     def __init__(self, cfg_getter, queue: Queue):
         super().__init__(daemon=True)
@@ -100,23 +101,30 @@ class SerialReader(threading.Thread):
         self._queue = queue
         self._stop = threading.Event()
         self._ser = None
+        self.last_raw = None
+        self.last_error = None
+        self.port_open = False
 
     def _open_port(self):
         if serial is None:
+            self.last_error = "pyserial not available"
             return
         cfg = self._cfg_getter()
-        port = cfg["serial_port"]
         try:
             self._ser = serial.Serial(
-                port=port,
-                baudrate=cfg["baudrate"],
-                bytesize=cfg["bytesize"],
-                parity=cfg["parity"],
-                stopbits=cfg["stopbits"],
-                timeout=cfg["timeout"],
+                port=cfg.get("serial_port", "COM3"),
+                baudrate=int(cfg.get("baudrate", 9600)),
+                bytesize=int(cfg.get("bytesize", 8)),
+                parity=str(cfg.get("parity", "N")),
+                stopbits=int(cfg.get("stopbits", 1)),
+                timeout=float(cfg.get("timeout", 0.2)),  # accept "0.2" or 0.2
             )
+            self.port_open = True
+            self.last_error = None
         except Exception as e:
             self._ser = None
+            self.port_open = False
+            self.last_error = f"open_port: {e}"
 
     def run(self):
         while not self._stop.is_set():
@@ -125,19 +133,27 @@ class SerialReader(threading.Thread):
                 time.sleep(0.5)
                 continue
             try:
-                line = self._ser.readline().decode(errors="ignore").strip()
+                # Many gauges end lines with CR only; try CR then LF
+                raw = self._ser.read_until(b"\r", 128)
+                if not raw:
+                    raw = self._ser.read_until(b"\n", 128)
+
+                line = raw.decode(errors="ignore").strip()
                 if line:
+                    self.last_raw = line
                     val = parse_value(line)
                     if val is not None:
                         self._queue.put(val)
-            except Exception:
-                # try to reopen port on any error
+
+            except Exception as e:
+                self.last_error = f"read: {e}"
                 try:
                     if self._ser:
                         self._ser.close()
                 except Exception:
                     pass
                 self._ser = None
+                self.port_open = False
                 time.sleep(0.5)
 
     def stop(self):
@@ -147,25 +163,27 @@ class SerialReader(threading.Thread):
                 self._ser.close()
         except Exception:
             pass
+        self.port_open = False
 
+# -------------------- Parsing --------------------
 VAL_RE = re.compile(r'[-+]?\d+(?:\.\d+)?')
 
 def parse_value(s: str):
-    """
-    Extract a float value from typical height gauge frames like:
-      "+00.289 mm", "0.289", "  12.345\tmm", etc.
-    Returns float (in mm) or None.
-    """
+    s = s.strip()
+    if not s:
+        return None
     m = VAL_RE.search(s)
     if not m:
         return None
     try:
-        return float(m.group(0))
+        val = float(m.group(0))
+        if 0.0 <= val <= 50.0:  # sanity bounds in mm
+            return val
     except ValueError:
-        return None
+        pass
+    return None
 
-# ---- App State (current pellet session) --------------------------------------
-
+# -------------------- App State --------------------
 class SessionState:
     def __init__(self):
         self.lock = threading.Lock()
@@ -192,11 +210,7 @@ class SessionState:
 
 session = SessionState()
 
-# ---- Flask App ---------------------------------------------------------------
-
-from flask import Flask
-import json
-
+# -------------------- Flask App --------------------
 app = Flask(__name__)
 cfg_cache = load_cfg()
 
@@ -204,28 +218,27 @@ reading_queue: Queue = Queue()
 reader = SerialReader(lambda: cfg_cache, reading_queue)
 
 def format_val(v):
-    if v is None: return None
+    if v is None:
+        return None
     places = int(cfg_cache.get("decimal_places", 3))
     return f"{v:.{places}f}"
 
+# Use before_serving if available; fallback safely
 try:
-    decorator = app.before_serving  # preferred in Flask >= 1.0 and valid in 3.1+
+    decorator = app.before_serving
 except AttributeError:
-    decorator = app.before_request   # fallback for environments without before_serving
+    decorator = app.before_request
 
 @app.errorhandler(Exception)
 def _log_errors(e):
-    # optional: keep server alive even if serial thread has issues
     return str(e), 500
 
 @app.before_request
 def _ensure_init_once():
-    # If we’re using before_request as the main decorator, the guarded init is done below.
     pass
 
 @decorator
 def _start_services():
-    # Guard to ensure we only init once even if decorator runs multiple times
     if getattr(app, "_started", False):
         return
     app._started = True
@@ -236,8 +249,6 @@ def _start_services():
 @app.route("/")
 def index():
     return render_template("index.html")
-
-from datetime import datetime
 
 def _combine_date_time(date_str, time_str, end=False):
     """
@@ -256,11 +267,10 @@ def _combine_date_time(date_str, time_str, end=False):
 
 @app.route("/pellets")
 def pellets_view():
-    # Query params
-    q_date = (request.args.get("date") or "").strip()
+    # Filters
+    q_date  = (request.args.get("date") or "").strip()
     q_start = (request.args.get("start") or "").strip()
-    q_end = (request.args.get("end") or "").strip()
-    q_batch = (request.args.get("batch_code") or "").strip()
+    q_end   = (request.args.get("end") or "").strip()
     q_lot   = (request.args.get("op_product_lot_no") or "").strip()
     q_pel   = (request.args.get("pellet_no") or "").strip()
     q_op    = (request.args.get("operator") or "").strip()
@@ -269,7 +279,6 @@ def pellets_view():
     start_iso = _combine_date_time(q_date, q_start, end=False) if q_date else ""
     end_iso   = _combine_date_time(q_date, q_end,   end=True)  if q_date else ""
 
-    # Build SQL
     sql = "SELECT * FROM pellets WHERE 1=1"
     params = []
     if start_iso:
@@ -278,9 +287,6 @@ def pellets_view():
     if end_iso:
         sql += " AND created_at <= ?"
         params.append(end_iso)
-    if q_batch:
-        sql += " AND (batch_code LIKE ?)"
-        params.append(f"%{q_batch}%")
     if q_lot:
         sql += " AND (op_product_lot_no LIKE ?)"
         params.append(f"%{q_lot}%")
@@ -300,7 +306,6 @@ def pellets_view():
     rows = conn.execute(sql, params).fetchall()
     conn.close()
 
-    # Build a light view model with delta (max-min)
     def to_vm(r):
         delta = None
         if r["max"] is not None and r["min"] is not None:
@@ -312,13 +317,63 @@ def pellets_view():
         "pellets.html",
         rows=rows_vm,
         fmt=format_val,
-        # echo current filters back to template to keep inputs filled
         q={
             "date": q_date, "start": q_start, "end": q_end,
-            "batch_code": q_batch, "op_product_lot_no": q_lot,
+            "op_product_lot_no": q_lot,
             "pellet_no": q_pel, "operator": q_op, "done": q_done,
         }
     )
+
+@app.route("/api/set_point", methods=["POST"])
+def api_set_point():
+    """
+    Body: { "idx": 1..5, "value": <float> }
+    Saves a point into the current active pellet and advances next_index.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    idx = int(data.get("idx", 0))
+    raw = str(data.get("value", "")).strip().replace(",", ".")
+    if raw.startswith("."):
+        raw = "0" + raw
+    try:
+        val = float(raw)
+    except Exception:
+        return jsonify({"ok": False, "error": "invalid value"}), 400
+    if not (1 <= idx <= 5):
+        return jsonify({"ok": False, "error": "idx must be 1..5"}), 400
+    if not session.active or session.pellet_id is None:
+        return jsonify({"ok": False, "error": "no active pellet"}), 409
+
+    save_point(session.pellet_id, idx, val)
+    if session.next_index == idx and session.next_index < 5:
+        session.next_index += 1
+    elif session.next_index < idx <= 5:
+        session.next_index = min(idx + 1, 6)
+    return jsonify({"ok": True, "next_index": session.next_index})
+
+
+@app.route("/api/finish_pellet", methods=["POST"])
+def api_finish_pellet():
+    """
+    Finalizes averages/min/max and ends the session.
+    Client decides whether to start the next pellet (so numbering never skips).
+    """
+    if not session.active or session.pellet_id is None:
+        return jsonify({"ok": False, "error": "no active pellet"}), 409
+    pid = session.pellet_id
+    finalize_pellet(pid)
+    session.stop()
+    return jsonify({"ok": True, "finished": pid})
+
+@app.route("/api/serial_status")
+def api_serial_status():
+    return jsonify({
+        "port": cfg_cache.get("serial_port"),
+        "baudrate": cfg_cache.get("baudrate"),
+        "is_open": getattr(reader, "port_open", False),
+        "last_raw": getattr(reader, "last_raw", None),
+        "last_error": getattr(reader, "last_error", None),
+    })
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
@@ -327,9 +382,16 @@ def settings():
         for k in DEFAULT_CFG.keys():
             if k in request.form:
                 v = request.form[k]
-                if k in ("baudrate","bytesize","stopbits","decimal_places"):
-                    try: v = int(v)
-                    except: continue
+                if k in ("baudrate", "bytesize", "stopbits", "decimal_places"):
+                    try:
+                        v = int(v)
+                    except:
+                        continue
+                elif k == "timeout":
+                    try:
+                        v = float(v)
+                    except:
+                        v = DEFAULT_CFG["timeout"]
                 cfg_cache[k] = v
         save_cfg(cfg_cache)
         return redirect(url_for("settings"))
@@ -338,17 +400,17 @@ def settings():
 @app.route("/api/start_pellet", methods=["POST"])
 def api_start_pellet():
     data = request.get_json(force=True, silent=True) or {}
-    batch = (data.get("batch_code") or "").strip()
+    lot       = (data.get("op_product_lot_no") or "").strip()
     pellet_no = (data.get("pellet_no") or "").strip()
-    operator = (data.get("operator") or "").strip()
-    notes = (data.get("notes") or "").strip()
+    operator  = (data.get("operator") or "").strip()
+    notes     = (data.get("notes") or "").strip()
 
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO pellets (created_at, batch_code, pellet_no, operator, notes)
+        INSERT INTO pellets (created_at, op_product_lot_no, pellet_no, operator, notes)
         VALUES (?, ?, ?, ?, ?)
-    """, (datetime.now().isoformat(timespec="seconds"), batch, pellet_no, operator, notes))
+    """, (datetime.now().isoformat(timespec="seconds"), lot, pellet_no, operator, notes))
     pid = cur.lastrowid
     conn.commit()
     conn.close()
@@ -403,25 +465,26 @@ def finalize_pellet(pid: int):
     conn = get_db()
     row = conn.execute("SELECT p1,p2,p3,p4,p5 FROM pellets WHERE id=?", (pid,)).fetchone()
     vals = [row["p1"], row["p2"], row["p3"], row["p4"], row["p5"]]
-    nums = [v for v in vals if isinstance(v,(int,float)) and v is not None]
+    nums = [v for v in vals if isinstance(v, (int, float)) and v is not None]
     if nums:
-        avg = sum(nums)/len(nums)
+        avg = sum(nums) / len(nums)
         mn = min(nums)
         mx = max(nums)
     else:
         avg = mn = mx = None
-    conn.execute("UPDATE pellets SET avg=?, min=?, max=?, done=1 WHERE id=?",
-                 (avg, mn, mx, pid))
+    conn.execute(
+        "UPDATE pellets SET avg=?, min=?, max=?, done=1 WHERE id=?",
+        (avg, mn, mx, pid)
+    )
     conn.commit()
     conn.close()
 
 @app.route("/api/export.csv")
 def api_export_csv():
-    # (same arg names as pellets_view)
-    q_date = (request.args.get("date") or "").strip()
+    # same filters as /pellets
+    q_date  = (request.args.get("date") or "").strip()
     q_start = (request.args.get("start") or "").strip()
-    q_end = (request.args.get("end") or "").strip()
-    q_batch = (request.args.get("batch_code") or "").strip()
+    q_end   = (request.args.get("end") or "").strip()
     q_lot   = (request.args.get("op_product_lot_no") or "").strip()
     q_pel   = (request.args.get("pellet_no") or "").strip()
     q_op    = (request.args.get("operator") or "").strip()
@@ -438,9 +501,6 @@ def api_export_csv():
     if end_iso:
         sql += " AND created_at <= ?"
         params.append(end_iso)
-    if q_batch:
-        sql += " AND (batch_code LIKE ?)"
-        params.append(f"%{q_batch}%")
     if q_lot:
         sql += " AND (op_product_lot_no LIKE ?)"
         params.append(f"%{q_lot}%")
@@ -450,7 +510,7 @@ def api_export_csv():
     if q_op:
         sql += " AND (operator LIKE ?)"
         params.append(f"%{q_op}%")
-    if q_done in ("0","1"):
+    if q_done in ("0", "1"):
         sql += " AND done=?"
         params.append(int(q_done))
     sql += " ORDER BY id ASC"
@@ -463,23 +523,23 @@ def api_export_csv():
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow([
-        "id","created_at","batch_code","op_product_lot_no","pellet_no","operator","notes",
+        "id","created_at","op_product_lot_no","pellet_no","operator","notes",
         "p1","p2","p3","p4","p5","avg","min","max","done"
     ])
     for r in rows:
         w.writerow([
-            r["id"], r["created_at"], r["batch_code"], r["op_product_lot_no"],
+            r["id"], r["created_at"], r["op_product_lot_no"],
             r["pellet_no"], r["operator"], r["notes"],
             r["p1"], r["p2"], r["p3"], r["p4"], r["p5"],
             r["avg"], r["min"], r["max"], r["done"]
         ])
     mem = io.BytesIO(out.getvalue().encode("utf-8"))
     mem.seek(0)
-    return send_file(mem, mimetype="text/csv", as_attachment=True, download_name="pellets_export.csv")
+    return send_file(mem, mimetype="text/csv",
+                     as_attachment=True, download_name="pellets_export.csv")
 
 if __name__ == "__main__":
     print("-> Starting Flask app on http://127.0.0.1:5000")
     init_db()
-    if not reader.is_alive():
-        reader.start()
-    app.run(debug=True, host="127.0.0.1", port=5000)
+    # Avoid reloader (prevents double-open of COM port)
+    app.run(debug=True, host="127.0.0.1", port=5000, use_reloader=False)

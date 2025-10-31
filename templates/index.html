@@ -1,28 +1,26 @@
 {% extends "base.html" %}
 {% block content %}
   <section class="card">
-    <h2>New Pellet</h2>
-    <form id="startForm">
-      <div class="grid">
-        <label>O/P Product Lot No.
-          <input name="op_product_lot_no" placeholder="e.g., ANP-28-46-251031-001">
-        </label>
-        <label>Pellet No
-          <input name="pellet_no" placeholder="e.g., 0001">
-        </label>
-        <label>Operator
-          <input name="operator" placeholder="e.g., John">
-        </label>
-      </div>
-      <label>Notes
-        <input name="notes" placeholder="optional note...">
-      </label>
-      <div class="row">
-        <button type="submit">Measure</button>
-        <button type="button" id="cancelBtn" class="ghost">Cancel</button>
-      </div>
+    <form><h2>Thickness Measurement</h2>
       <p class="hint">Once started, press the gauge's SEND button 5 times (Point 1→5). Values auto-save.</p>
     </form>
+    <form id="pellet-form" class="row" onsubmit="return false;">
+  <input id="op_product_lot_no" placeholder="O/P Product Lot No.">
+  <input id="pellet_no" placeholder="Pellet No.">
+  <input id="operator" placeholder="Operator">
+  <input id="notes" placeholder="Notes">
+  <button id="start-btn" class="btn">Start Measurement</button>
+  <button id="stop-btn" class="btn">Stop Measurement</button>
+</form>
+
+<div class="grid" style="display:grid;grid-template-columns:repeat(5,minmax(0,120px));gap:10px;margin-top:12px;">
+  <input id="p1" inputmode="decimal" placeholder="P1">
+  <input id="p2" inputmode="decimal" placeholder="P2">
+  <input id="p3" inputmode="decimal" placeholder="P3">
+  <input id="p4" inputmode="decimal" placeholder="P4">
+  <input id="p5" inputmode="decimal" placeholder="P5">
+</div>
+
   </section>
 
   <section class="card">
@@ -35,4 +33,128 @@
       <div><strong>Last Time:</strong> <span id="lastTime">—</span></div>
     </div>
   </section>
+
+{% block scripts %}
+<script>
+(function() {
+  // Config
+  const DECIMALS = 3;           // show 3 places
+  const AUTO_NEXT = true;       // auto-start next pellet after P5 if enabled below
+
+  // Elements
+  const form = document.getElementById('pellet-form');   // meta form (lot/pellet_no/operator)
+  const inputs = [
+    document.getElementById('p1'),
+    document.getElementById('p2'),
+    document.getElementById('p3'),
+    document.getElementById('p4'),
+    document.getElementById('p5'),
+  ];
+  const autoNextChk = document.getElementById('auto-next');
+  const startBtn = document.getElementById('start-btn');
+
+  // Helpers
+  function normNum(s) {
+    if (!s) return null;
+    s = String(s).trim().replace(',', '.');
+    if (s.startsWith('.')) s = '0' + s;
+    const v = Number(s);
+    return Number.isFinite(v) ? v : null;
+  }
+  function fmt(v) { return v.toFixed(DECIMALS); }
+
+  async function postJSON(url, body) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body||{})
+    });
+    return r.json();
+  }
+
+  // Start pellet once and focus P1
+  async function startPelletOnce() {
+    // avoid duplicate starts
+    if (startBtn.dataset.active === '1') return;
+
+    const payload = {
+      op_product_lot_no: document.getElementById('op_product_lot_no')?.value || '',
+      pellet_no: document.getElementById('pellet_no')?.value || '',
+      operator: document.getElementById('operator')?.value || '',
+      notes: document.getElementById('notes')?.value || ''
+    };
+    const res = await postJSON('/api/start_pellet', payload);
+    if (!res.ok) { console.warn(res); return; }
+    startBtn.dataset.active = '1';
+    inputs[0].focus();
+  }
+
+  // Wire input & paste on each P field
+  inputs.forEach((el, idx) => {
+    const i = idx + 1; // 1..5
+    function handleValue(raw) {
+      const v = normNum(raw);
+      if (v == null) return;
+      el.value = fmt(v);
+      postJSON('/api/set_point', { idx: i, value: v }).then(() => {
+        if (i < 5) {
+          inputs[idx+1].focus();
+          inputs[idx+1].select?.();
+        } else {
+          // Finished P5
+          const wantAuto = autoNextChk?.checked && AUTO_NEXT;
+          postJSON('/api/finish_pellet', { auto_next: wantAuto }).then(res => {
+            // clear fields if not auto-next
+            if (!wantAuto) {
+              startBtn.dataset.active = '0';
+            } else {
+              // auto-next started; clear fields for next cycle and focus P1
+              inputs.forEach(e => e.value = '');
+              inputs[0].focus();
+              inputs[0].select?.();
+            }
+          });
+        }
+      });
+    }
+
+    // On paste
+    el.addEventListener('paste', (ev) => {
+      ev.preventDefault();
+      const text = (ev.clipboardData || window.clipboardData).getData('text');
+      if (text) handleValue(text);
+    });
+
+    // On typing (device may type chars one by one and then 'Enter')
+    el.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        handleValue(el.value);
+      }
+    });
+
+    // On any input change (covers normal typing too)
+    el.addEventListener('input', () => {
+      // If device dumps the full value at once, this will catch it
+      // (we only advance when it parses to a number)
+      const v = normNum(el.value);
+      if (v != null) {
+        // Slight debounce so partial keystrokes don't trigger
+        clearTimeout(el._t);
+        el._t = setTimeout(() => handleValue(el.value), 50);
+      }
+    });
+
+    // First focus triggers start (quality-of-life)
+    el.addEventListener('focus', startPelletOnce);
+  });
+
+  // Explicit Start button (if you have one)
+  startBtn?.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await startPelletOnce();
+  });
+})();
+</script>
+{% endblock %}
 {% endblock %}
