@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <h2>New Pellet</h2>
+    <form id="startForm">
+      <div class="grid">
+        <label>O/P Product Lot No.
+          <input name="op_product_lot_no" placeholder="e.g., ANP-28-46-251031-001">
+        </label>
+        <label>Pellet No
+          <input name="pellet_no" placeholder="e.g., 0001">
+        </label>
+        <label>Operator
+          <input name="operator" placeholder="e.g., John">
+        </label>
+      </div>
+      <label>Notes
+        <input name="notes" placeholder="optional note...">
+      </label>
+      <div class="row">
+        <button type="submit">Measure</button>
+        <button type="button" id="cancelBtn" class="ghost">Cancel</button>
+      </div>
+      <p class="hint">Once started, press the gauge's SEND button 5 times (Point 1→5). Values auto-save.</p>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Live Status</h2>
+    <div id="statusBox" class="status">
+      <div><strong>Session:</strong> <span id="sessActive">—</span></div>
+      <div><strong>Pellet ID:</strong> <span id="sessPid">—</span></div>
+      <div><strong>Next Point:</strong> <span id="sessNext">—</span></div>
+      <div><strong>Last Reading:</strong> <span id="lastVal">—</span> <span id="unit"></span></div>
+      <div><strong>Last Time:</strong> <span id="lastTime">—</span></div>
+    </div>
+  </section>
+{% endblock %}

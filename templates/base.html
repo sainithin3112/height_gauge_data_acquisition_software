@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pellet Thickness Logging</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <nav class="topbar">
+      <div class="brand">Pellet Thickness Logging</div>
+      <div class="nav">
+        <a href="{{ url_for('index') }}">Dashboard</a>
+        <a href="{{ url_for('pellets_view') }}">Records</a>
+        <a href="{{ url_for('settings') }}">Settings</a>
+      </div>
+    </nav>
+    <main class="container">
+      {% block content %}{% endblock %}
+    </main>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

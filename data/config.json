@@ -1,0 +1,10 @@
+{
+  "serial_port": "COM3",
+  "baudrate": 9600,
+  "bytesize": 8,
+  "parity": "N",
+  "stopbits": 1,
+  "timeout": "0.1",
+  "unit": "mm",
+  "decimal_places": 3
+}

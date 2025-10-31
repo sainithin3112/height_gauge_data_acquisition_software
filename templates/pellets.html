@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="card">
+    <div class="card-head">
+      <h2>Pellet Thickness Records</h2>
+    </div>
+
+    <!-- FILTER PANEL -->
+    <form class="filter" method="get" action="{{ url_for('pellets_view') }}">
+      <!-- Date & Time -->
+      <div class="field">
+        <label for="f-date">Date</label>
+        <input id="f-date" type="date" name="date" value="{{ q.date or '' }}">
+      </div>
+      <div class="field">
+        <label for="f-start">Start time</label>
+        <input id="f-start" type="time" name="start" value="{{ q.start or '' }}">
+      </div>
+      <div class="field">
+        <label for="f-end">End time</label>
+        <input id="f-end" type="time" name="end" value="{{ q.end or '' }}">
+      </div>
+
+      <!-- Meta -->
+      <div class="field">
+        <label for="f-lot">O/P Product Lot No.</label>
+        <input id="f-lot" type="text" name="op_product_lot_no" value="{{ q.op_product_lot_no or '' }}" placeholder="Lot-1234">
+      </div>
+      <div class="field">
+        <label for="f-pel">Pellet No.</label>
+        <input id="f-pel" type="text" name="pellet_no" value="{{ q.pellet_no or '' }}" placeholder="0001">
+      </div>
+      <div class="field">
+        <label for="f-op">Operator</label>
+        <input id="f-op" type="text" name="operator" value="{{ q.operator or '' }}" placeholder="Sai">
+      </div>
+      <div class="field">
+        <label for="f-done">Status</label>
+        <select id="f-done" name="done">
+          <option value=""  {{ ''  == q.done and 'selected' or '' }}>All</option>
+          <option value="1" {{ '1' == q.done and 'selected' or '' }}>Done</option>
+          <option value="0" {{ '0' == q.done and 'selected' or '' }}>Not Done</option>
+        </select>
+      </div>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button type="submit" class="btn">Search</button>
+
+        <a class="btn ghost"
+           href="{{ url_for('api_export_csv',
+                            date=q.date, start=q.start, end=q.end,
+                            op_product_lot_no=q.op_product_lot_no,
+                            pellet_no=q.pellet_no, operator=q.operator, done=q.done) }}">
+          Export CSV
+        </a>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Date &amp; Time</th>
+            <th>O/P Product Lot No.</th>
+            <th>Pellet No.</th>
+            <th>Operator</th>
+            <th>P1</th><th>P2</th><th>P3</th><th>P4</th><th>P5</th>
+            <th>Avg</th>
+            <th>Max−Min</th>
+            <th>Done</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% if rows and rows|length > 0 %}
+          {% for r in rows %}
+            <tr>
+              <td>{{ r["id"] }}</td>
+              <td>{{ r["created_at"] }}</td>
+              <td>{{ r["op_product_lot_no"] }}</td>
+              <td>{{ r["pellet_no"] }}</td>
+              <td>{{ r["operator"] }}</td>
+              <td>{{ fmt(r["p1"]) }}</td>
+              <td>{{ fmt(r["p2"]) }}</td>
+              <td>{{ fmt(r["p3"]) }}</td>
+              <td>{{ fmt(r["p4"]) }}</td>
+              <td>{{ fmt(r["p5"]) }}</td>
+              <td>{{ fmt(r["avg"]) }}</td>
+              <td>{{ fmt(r["delta"]) }}</td>
+              <td><span class="pill {{ 'ok' if r['done'] else 'muted' }}">{{ 'Done' if r['done'] else '—' }}</span></td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="14">
+              <div class="empty">
+                <div class="empty-title">No data found</div>
+                <div class="empty-text">Try changing the date/time window or clearing filters.</div>
+              </div>
+            </td>
+          </tr>
+        {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endblock %}
